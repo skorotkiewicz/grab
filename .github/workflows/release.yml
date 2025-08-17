@@ -30,13 +30,6 @@ jobs:
             artifact_name: downloader
             release_name: downloader-linux-x64
             
-          - name: Linux ARM64
-            os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            artifact_name: downloader
-            release_name: downloader-linux-arm64
-            cross: true
-            
           - name: macOS Intel
             os: macos-latest
             target: x86_64-apple-darwin
@@ -152,7 +145,6 @@ jobs:
           
           ### Linux  
           - **downloader-linux-x64** - Standard Linux x86_64
-          - **downloader-linux-arm64** - ARM64 Linux (Raspberry Pi 4+, AWS Graviton)
           
           ### macOS
           - **downloader-macos-x64** - Intel Macs
