@@ -6,7 +6,10 @@
 
 A high-performance asynchronous file downloader written in Rust. `grab` combines the simplicity of `wget` with the power of multi-threaded concurrency, parallel file downloads, and modern async I/O. Inspired by the efficiency of `pacman`.
 
-## ✨ Features
+![intro](intro.png)
+
+ <details>
+  <summary>✨ Features</summary>
 
 - 🚀 **Multi-threaded Downloads**: Concurrent connections per file for maximum speed.
 - 📂 **Parallel File Downloads**: Download multiple files simultaneously with intelligent queueing.
@@ -17,7 +20,7 @@ A high-performance asynchronous file downloader written in Rust. `grab` combines
 - ⏳ **Bandwidth Limiting**: Global rate limiting across all concurrent downloads.
 - 🔄 **Auto-Filename**: Automatically derives filenames from URLs (including query parameters) if no output is specified.
 - 🛠️ **Pure Async**: Built on `tokio` and `reqwest` for maximum efficiency.
-
+</details> 
 
 ## Installation
 
