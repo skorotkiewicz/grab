@@ -113,16 +113,23 @@ impl BandwidthLimiter {
         }
     }
 }
+struct DownloadState {
+    total_files: usize,
+    finished_files: std::sync::atomic::AtomicUsize,
+    total_pb: ProgressBar,
+}
+
 
 struct FileDownloader {
     client: Client,
     config: Arc<DownloadConfig>,
     limiter: Option<Arc<BandwidthLimiter>>,
     multi_progress: indicatif::MultiProgress,
+    state: Arc<DownloadState>,
 }
 
 impl FileDownloader {
-    fn new(config: DownloadConfig, multi_progress: indicatif::MultiProgress, limiter: Option<Arc<BandwidthLimiter>>) -> Self {
+    fn new(config: DownloadConfig, multi_progress: indicatif::MultiProgress, limiter: Option<Arc<BandwidthLimiter>>, state: Arc<DownloadState>) -> Self {
         let client = Client::builder()
             .user_agent(&config.user_agent)
             .connect_timeout(config.timeout)
@@ -133,7 +140,8 @@ impl FileDownloader {
             client, 
             config: Arc::new(config), 
             limiter,
-            multi_progress
+            multi_progress,
+            state,
         }
     }
 
@@ -149,6 +157,10 @@ impl FileDownloader {
             .and_then(|ct_len| ct_len.to_str().ok())
             .and_then(|ct_len| ct_len.parse().ok())
             .unwrap_or(0);
+
+        if total_size > 0 {
+            self.state.total_pb.inc_length(total_size);
+        }
 
         let pb = self.multi_progress.insert(0, ProgressBar::new(total_size));
         pb.set_style(
@@ -180,16 +192,21 @@ impl FileDownloader {
                     return Ok(())
                 }
                 pb.set_position(already_downloaded);
+                self.state.total_pb.inc(already_downloaded);
             }
         } else if file_exists {
             File::create(output_path).await?;
         }
 
-        if supports_range && !self.config.resume && total_size > self.config.chunk_size {
+        let res = if supports_range && !self.config.resume && total_size > self.config.chunk_size {
             self.download_multi_threaded(total_size, pb).await
         } else {
             self.download_single_threaded(already_downloaded, pb).await
-        }
+        };
+
+        let finished = self.state.finished_files.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        self.state.total_pb.set_message(format!("({}/{})", finished, self.state.total_files));
+        res
     }
 
     async fn download_single_threaded(&self, start_pos: u64, pb: ProgressBar) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -216,6 +233,7 @@ impl FileDownloader {
         while let Some(chunk) = tokio::time::timeout(self.config.timeout, response.chunk()).await?? {
             file.write_all(&chunk).await?;
             pb.inc(chunk.len() as u64);
+            self.state.total_pb.inc(chunk.len() as u64);
             if let Some(ref limiter) = self.limiter {
                 limiter.throttle(chunk.len() as u64).await;
             }
@@ -254,9 +272,10 @@ impl FileDownloader {
 
             let timeout = self.config.timeout;
             let limiter = self.limiter.clone();
+            let total_pb = self.state.total_pb.clone();
             let handle = tokio::spawn(async move {
                 let _permit = semaphore_clone.acquire().await.unwrap();
-                download_chunk(client, url, output_path, start, end, pb_clone, timeout, limiter).await
+                download_chunk(client, url, output_path, start, end, pb_clone, timeout, limiter, total_pb).await
             });
 
             handles.push(handle);
@@ -280,6 +299,7 @@ async fn download_chunk(
     pb: Arc<ProgressBar>,
     timeout: Duration,
     limiter: Option<Arc<BandwidthLimiter>>,
+    total_pb: ProgressBar,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut headers = HeaderMap::new();
     headers.insert(RANGE, format!("bytes={}-{}", start, end).parse().unwrap());
@@ -298,6 +318,7 @@ async fn download_chunk(
     while let Some(chunk) = tokio::time::timeout(timeout, response.chunk()).await?? {
         file.write_all(&chunk).await?;
         pb.inc(chunk.len() as u64);
+        total_pb.inc(chunk.len() as u64);
         if let Some(ref lim) = limiter {
             lim.throttle(chunk.len() as u64).await;
         }
@@ -337,16 +358,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let multi_progress = indicatif::MultiProgress::new();
     let semaphore = Arc::new(Semaphore::new(args.parallel_downloads));
     let limiter = args.limit_rate.map(|limit| Arc::new(BandwidthLimiter::new(limit)));
-    let mut handles = Vec::new();
-
+    
     // Total progress bar
-    let total_pb = multi_progress.add(ProgressBar::new(args.urls.len() as u64));
+    let total_pb = multi_progress.add(ProgressBar::new(0));
     total_pb.set_style(
         ProgressStyle::default_bar()
-            .template("Total ({pos}/{len}) [ {wide_bar} ] {percent}%")
+            .template("Total {msg} {bytes:>10}/{total_bytes:<10} {bytes_per_sec:>12} {eta:>6} [ {wide_bar} ] {percent}%")
             .unwrap()
             .progress_chars("---c  o "),
     );
+    total_pb.set_message(format!("(0/{})", args.urls.len()));
+
+    let state = Arc::new(DownloadState {
+        total_files: args.urls.len(),
+        finished_files: std::sync::atomic::AtomicUsize::new(0),
+        total_pb: total_pb.clone(),
+    });
+
+    let mut handles = Vec::new();
 
     for url in args.urls {
         let output_path = if args.output.is_some() && handles.is_empty() {
@@ -369,15 +398,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             timeout: args.timeout,
         };
 
-        let downloader = Arc::new(FileDownloader::new(config, multi_progress.clone(), limiter.clone()));
+        let downloader = Arc::new(FileDownloader::new(config, multi_progress.clone(), limiter.clone(), state.clone()));
         let sem = semaphore.clone();
-        let t_pb = total_pb.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-            let res = downloader.download().await;
-            t_pb.inc(1);
-            res
+            downloader.download().await
         });
         handles.push(handle);
     }
@@ -386,7 +412,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = handle.await?;
     }
 
-    total_pb.finish_with_message("Done");
+    total_pb.finish();
 
     Ok(())
 }
