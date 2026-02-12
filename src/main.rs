@@ -7,6 +7,7 @@ use reqwest::Client;
 use tokio::fs::{metadata, File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Semaphore;
+use std::net::IpAddr;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -48,6 +49,14 @@ struct Args {
     /// Bandwidth limit (e.g. 512K, 1M, 2M)
     #[arg(short = 'l', long, value_parser = parse_bandwidth)]
     limit_rate: Option<u64>,
+
+    /// Force IPv4 only
+    #[arg(short = '4', long, conflicts_with = "inet6_only")]
+    inet4_only: bool,
+
+    /// Force IPv6 only
+    #[arg(short = '6', long, conflicts_with = "inet4_only")]
+    inet6_only: bool,
 }
 
 fn parse_bandwidth(arg: &str) -> Result<u64, String> {
@@ -81,6 +90,8 @@ struct DownloadConfig {
     resume: bool,
     user_agent: String,
     timeout: Duration,
+    force_ipv4: bool,
+    force_ipv6: bool,
 }
 
 struct BandwidthLimiter {
@@ -130,10 +141,17 @@ struct FileDownloader {
 
 impl FileDownloader {
     fn new(config: DownloadConfig, multi_progress: indicatif::MultiProgress, limiter: Option<Arc<BandwidthLimiter>>, state: Arc<DownloadState>) -> Self {
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .user_agent(&config.user_agent)
-            .connect_timeout(config.timeout)
-            .build()
+            .connect_timeout(config.timeout);
+
+        if config.force_ipv4 {
+            builder = builder.local_address(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        } else if config.force_ipv6 {
+            builder = builder.local_address(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED));
+        }
+
+        let client = builder.build()
             .expect("Failed to create HTTP client");
 
         Self { 
@@ -396,6 +414,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             resume: args.resume,
             user_agent: args.user_agent.clone(),
             timeout: args.timeout,
+            force_ipv4: args.inet4_only,
+            force_ipv6: args.inet6_only,
         };
 
         let downloader = Arc::new(FileDownloader::new(config, multi_progress.clone(), limiter.clone(), state.clone()));

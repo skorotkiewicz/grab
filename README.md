@@ -47,7 +47,7 @@ cargo build --release
 # The binary will be available at ./target/release/grab
 ```
 
-## 🎮 Usage
+## Usage
 
 ```bash
 grab [OPTIONS] <URL>...
@@ -94,6 +94,8 @@ cat url_lists.txt | grab -j 10
 | `-u` | `--user-agent` | HTTP User-Agent string | `Grab/2.0` |
 | `-T` | `--timeout` | Inactivity timeout (seconds) | `30` |
 | `-l` | `--limit-rate` | Bandwidth limit (e.g. 512K, 1M) | None |
+| `-4` | `--inet4-only` | Force IPv4 only | `false` |
+| `-6` | `--inet6-only` | Force IPv6 only | `false` |
 
 ## Architecture
 
