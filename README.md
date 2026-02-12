@@ -91,7 +91,7 @@ If a checksum is provided, `grab` will verify the file after download and inform
 |------|-----------|-------------|---------|
 | `-O` | `--output` | Output filename (single URL only) | Derived from URL |
 | `-c` | `--resume` | Resume partial download | `false` |
-| `-t` | `--threads` | Concurrent connections *per file* | `4` |
+| `-t` | `--threads` | Concurrent connections *per file* | `1` |
 | `-j` | `--parallel-downloads` | Max parallel *file* downloads | `5` |
 | `-s` | `--chunk-size` | Chunk size in bytes | `1048576` (1MB) |
 | `-u` | `--user-agent` | HTTP User-Agent string | `Grab/2.0` |
