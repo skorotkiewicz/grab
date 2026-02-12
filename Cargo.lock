@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "grab"
-version = "2.1.4"
+version = "2.1.5"
 dependencies = [
  "blake2",
  "blake3",

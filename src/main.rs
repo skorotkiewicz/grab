@@ -226,7 +226,7 @@ impl FileDownloader {
         let pb = self.multi_progress.insert(0, ProgressBar::new(total_size));
         pb.set_style(
             ProgressStyle::default_bar()
-                .template(&format!(" {{prefix:<16}} {{bytes:>10}}/{{total_bytes:<10}} {{bytes_per_sec:>12}} {{eta:>6}} [{{wide_bar}}] {{percent:>3}}% {{msg}}"))
+                .template(&format!(" {{prefix:<28}} {{bytes:>10}}/{{total_bytes:<10}} {{bytes_per_sec:>12}} {{eta:>6}} [{{wide_bar}}] {{percent:>3}}% {{msg}}"))
                 .unwrap()
                 .progress_chars("---c  o "),
         );
@@ -579,7 +579,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let total_pb = multi_progress.add(ProgressBar::new(0));
     total_pb.set_style(
         ProgressStyle::default_bar()
-            .template("Total {msg} {bytes:>10}/{total_bytes:<10} {bytes_per_sec:>12} {eta:>6} [ {wide_bar} ] {percent}%")
+            .template("Total {msg:<22} {bytes:>10}/{total_bytes:<10} {bytes_per_sec:>12} {eta:>6} [ {wide_bar} ] {percent:3}%")
             .unwrap()
             .progress_chars("---c  o "),
     );
