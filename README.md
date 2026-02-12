@@ -16,26 +16,36 @@ A high-performance asynchronous file downloader written in Rust. `grab` combines
 - 🔄 **Auto-Filename**: Automatically derives filenames from URLs (including query parameters) if no output is specified.
 - 🛠️ **Pure Async**: Built on `tokio` and `reqwest` for maximum efficiency and low resource usage.
 
-## 🚀 Quick Start
 
-### Prerequisites
+## Installation
 
-- Rust 1.75+ installed ([rustup.rs](https://rustup.rs/))
+### Arch Linux (AUR)
 
-### Installation
+You can install `grab` from the AUR using your favorite helper:
+
+```bash
+yay -S grab-bin
+# or
+paru -S grab-bin
+```
+
+### From Source
 
 ```bash
 # Clone the repository
 git clone https://github.com/skorotkiewicz/grab
 cd grab
 
-# Build release version
+# Install from source
+cargo install --path .
+
+# Build from source
 cargo build --release
 
 # The binary will be available at ./target/release/grab
 ```
 
-## 🎮 Usage
+## Usage
 
 ```bash
 grab [OPTIONS] <URL>
@@ -80,7 +90,7 @@ grab [OPTIONS] <URL>
 | `-T` | `--timeout` | Inactivity timeout (seconds) | `30` |
 | `-l` | `--limit-rate` | Bandwidth limit (e.g. 512K, 1M) | None |
 
-## 🏗️ Architecture
+## Architecture
 
 ### Multi-threading vs. Resume
 
@@ -91,13 +101,13 @@ grab [OPTIONS] <URL>
 
 Unlike simple request timeouts, `grab` monitors the *flow* of data. If the server is slow but steady, the download continues. If no bytes are received for the duration of the timeout, it gracefully errors, allowing for a manual or automated retry.
 
-## 🛡️ Reliability
+## Reliability
 
 - **Transactional Writes**: Files are opened with standard POSIX flags ensuring data is written where it belongs.
 - **Zero Pre-allocation**: Doesn't waste disk space or time pre-allocating large files before the data actually arrives.
 - **Error Recovery**: Handles network drops and server timeouts by reporting them clearly so you can resume.
 
-## 📦 Dependencies
+## Dependencies
 
 - **reqwest**: Leading HTTP client for Rust.
 - **tokio**: Industry-standard async runtime.
