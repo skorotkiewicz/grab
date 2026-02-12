@@ -57,6 +57,10 @@ struct Args {
     /// Force IPv6 only
     #[arg(short = '6', long, conflicts_with = "inet4_only")]
     inet6_only: bool,
+
+    /// Version
+    #[arg(short = 'V', long)]
+    version: bool,
 }
 
 fn parse_bandwidth(arg: &str) -> Result<u64, String> {
@@ -350,6 +354,11 @@ async fn download_chunk(
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut args = Args::parse();
     
+    if args.version {
+        println!("grab {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     // Read from stdin if no URLs provided
     if args.urls.is_empty() {
         use std::io::IsTerminal;
