@@ -355,7 +355,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut args = Args::parse();
     
     if args.version {
-        println!("grab {}", env!("CARGO_PKG_VERSION"));
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
