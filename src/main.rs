@@ -9,6 +9,12 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Semaphore;
 use std::net::IpAddr;
 use clap::Parser;
+// Hashing algorithms
+use sha1::Sha1;
+use sha2::{Sha224, Sha256, Sha384, Sha512, Digest};
+use blake2::Blake2b512;
+use blake3;
+use tokio::io::AsyncReadExt;
 
 #[derive(Parser, Debug)]
 #[command(name = "grab")]
@@ -85,6 +91,38 @@ fn parse_duration(arg: &str) -> Result<Duration, std::num::ParseIntError> {
     Ok(Duration::from_secs(seconds))
 }
 
+#[derive(Debug, Clone)]
+enum Checksum {
+    Sha1(String),
+    Sha224(String),
+    Sha256(String),
+    Sha384(String),
+    Sha512(String),
+    Blake2b(String),
+    Blake3(String),
+}
+
+impl Checksum {
+    fn parse(s: &str) -> Option<Self> {
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        let hash_type = parts[0].to_lowercase();
+        let hash = parts[1].to_string();
+        match hash_type.as_str() {
+            "sha1" | "sha1sum" => Some(Checksum::Sha1(hash)),
+            "sha224" | "sha224sum" => Some(Checksum::Sha224(hash)),
+            "sha256" | "sha256sum" => Some(Checksum::Sha256(hash)),
+            "sha384" | "sha384sum" => Some(Checksum::Sha384(hash)),
+            "sha512" | "sha512sum" => Some(Checksum::Sha512(hash)),
+            "b2sum" | "blake2" => Some(Checksum::Blake2b(hash)),
+            "b3sum" | "blake3" => Some(Checksum::Blake3(hash)),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct DownloadConfig {
     url: String,
@@ -96,6 +134,7 @@ struct DownloadConfig {
     timeout: Duration,
     force_ipv4: bool,
     force_ipv6: bool,
+    checksum: Option<Checksum>,
 }
 
 struct BandwidthLimiter {
@@ -187,7 +226,7 @@ impl FileDownloader {
         let pb = self.multi_progress.insert(0, ProgressBar::new(total_size));
         pb.set_style(
             ProgressStyle::default_bar()
-                .template(&format!(" {{prefix:<16}} {{bytes:>10}}/{{total_bytes:<10}} {{bytes_per_sec:>12}} {{eta:>6}} [{{wide_bar}}] {{percent:>3}}%"))
+                .template(&format!(" {{prefix:<16}} {{bytes:>10}}/{{total_bytes:<10}} {{bytes_per_sec:>12}} {{eta:>6}} [{{wide_bar}}] {{percent:>3}}% {{msg}}"))
                 .unwrap()
                 .progress_chars("---c  o "),
         );
@@ -221,14 +260,99 @@ impl FileDownloader {
         }
 
         let res = if supports_range && !self.config.resume && total_size > self.config.chunk_size {
-            self.download_multi_threaded(total_size, pb).await
+            self.download_multi_threaded(total_size, pb.clone()).await
         } else {
-            self.download_single_threaded(already_downloaded, pb).await
+            self.download_single_threaded(already_downloaded, pb.clone()).await
         };
 
         let finished = self.state.finished_files.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         self.state.total_pb.set_message(format!("({}/{})", finished, self.state.total_files));
+        
+        if res.is_ok() {
+            if let Some(ref checksum) = self.config.checksum {
+                pb.set_message("Verifying...");
+                match self.verify_checksum(checksum).await {
+                    Ok(true) => pb.finish_with_message("Verified"),
+                    Ok(false) => pb.finish_with_message("Checksum mismatch!"),
+                    Err(e) => pb.finish_with_message(format!("Verification error: {}", e)),
+                }
+            } else {
+                pb.finish();
+            }
+        }
+
         res
+    }
+
+    async fn verify_checksum(&self, checksum: &Checksum) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let mut file = File::open(&self.config.output_path).await?;
+        let mut buffer = vec![0u8; 8192];
+        
+        match checksum {
+            Checksum::Sha1(expected) => {
+                let mut hasher = Sha1::new();
+                while let Ok(n) = file.read(&mut buffer).await {
+                    if n == 0 { break; }
+                    hasher.update(&buffer[..n]);
+                }
+                let hash = hex::encode(hasher.finalize());
+                Ok(hash == expected.to_lowercase())
+            }
+            Checksum::Sha224(expected) => {
+                let mut hasher = Sha224::new();
+                while let Ok(n) = file.read(&mut buffer).await {
+                    if n == 0 { break; }
+                    hasher.update(&buffer[..n]);
+                }
+                let hash = hex::encode(hasher.finalize());
+                Ok(hash == expected.to_lowercase())
+            }
+            Checksum::Sha256(expected) => {
+                let mut hasher = Sha256::new();
+                while let Ok(n) = file.read(&mut buffer).await {
+                    if n == 0 { break; }
+                    hasher.update(&buffer[..n]);
+                }
+                let hash = hex::encode(hasher.finalize());
+                Ok(hash == expected.to_lowercase())
+            }
+            Checksum::Sha384(expected) => {
+                let mut hasher = Sha384::new();
+                while let Ok(n) = file.read(&mut buffer).await {
+                    if n == 0 { break; }
+                    hasher.update(&buffer[..n]);
+                }
+                let hash = hex::encode(hasher.finalize());
+                Ok(hash == expected.to_lowercase())
+            }
+            Checksum::Sha512(expected) => {
+                let mut hasher = Sha512::new();
+                while let Ok(n) = file.read(&mut buffer).await {
+                    if n == 0 { break; }
+                    hasher.update(&buffer[..n]);
+                }
+                let hash = hex::encode(hasher.finalize());
+                Ok(hash == expected.to_lowercase())
+            }
+            Checksum::Blake2b(expected) => {
+                let mut hasher = Blake2b512::new();
+                while let Ok(n) = file.read(&mut buffer).await {
+                    if n == 0 { break; }
+                    hasher.update(&buffer[..n]);
+                }
+                let hash = hex::encode(hasher.finalize());
+                Ok(hash == expected.to_lowercase())
+            }
+            Checksum::Blake3(expected) => {
+                let mut hasher = blake3::Hasher::new();
+                while let Ok(n) = file.read(&mut buffer).await {
+                    if n == 0 { break; }
+                    hasher.update(&buffer[..n]);
+                }
+                let hash = hasher.finalize().to_hex().to_string();
+                Ok(hash == expected.to_lowercase())
+            }
+        }
     }
 
     async fn download_single_threaded(&self, start_pos: u64, pb: ProgressBar) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -261,7 +385,7 @@ impl FileDownloader {
             }
         }
 
-        pb.finish();
+        // pb.finish();
         Ok(())
     }
 
@@ -307,7 +431,7 @@ impl FileDownloader {
             handle.await??;
         }
 
-        pb.finish();
+        // pb.finish();
         Ok(())
     }
 }
@@ -352,15 +476,33 @@ async fn download_chunk(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut args = Args::parse();
+    let args = Args::parse();
     
     if args.version {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
+    // List of (URL, Optional Checksum)
+    let mut download_tasks: Vec<(String, Option<Checksum>)> = Vec::new();
+
+    // Parse URLs and Checksums from arguments
+    let mut i = 0;
+    while i < args.urls.len() {
+        let url = args.urls[i].clone();
+        let mut checksum = None;
+        if i + 1 < args.urls.len() && args.urls[i+1].contains(':') {
+            if let Some(parsed) = Checksum::parse(&args.urls[i+1]) {
+                checksum = Some(parsed);
+                i += 1; // Consume the checksum argument
+            }
+        }
+        download_tasks.push((url, checksum));
+        i += 1;
+    }
+
     // Read from stdin if no URLs provided
-    if args.urls.is_empty() {
+    if download_tasks.is_empty() {
         use std::io::IsTerminal;
         if !std::io::stdin().is_terminal() {
             use tokio::io::AsyncBufReadExt;
@@ -369,13 +511,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             while let Some(line) = reader.next_line().await? {
                 let line = line.trim();
                 if !line.is_empty() {
-                    args.urls.push(line.to_string());
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let url = parts[0].to_string();
+                        let checksum = Checksum::parse(parts[1]);
+                        download_tasks.push((url, checksum));
+                    } else {
+                        download_tasks.push((parts[0].to_string(), None));
+                    }
                 }
             }
         }
     }
 
-    if args.urls.is_empty() {
+    if download_tasks.is_empty() {
         use clap::CommandFactory;
         Args::command().print_help()?;
         println!();
@@ -394,17 +543,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .unwrap()
             .progress_chars("---c  o "),
     );
-    total_pb.set_message(format!("(0/{})", args.urls.len()));
+    total_pb.set_message(format!("(0/{})", download_tasks.len()));
 
     let state = Arc::new(DownloadState {
-        total_files: args.urls.len(),
+        total_files: download_tasks.len(),
         finished_files: std::sync::atomic::AtomicUsize::new(0),
         total_pb: total_pb.clone(),
     });
 
     let mut handles = Vec::new();
 
-    for url in args.urls {
+    for (url, checksum) in download_tasks {
         let output_path = if args.output.is_some() && handles.is_empty() {
             args.output.clone().unwrap()
         } else {
@@ -425,6 +574,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             timeout: args.timeout,
             force_ipv4: args.inet4_only,
             force_ipv6: args.inet6_only,
+            checksum,
         };
 
         let downloader = Arc::new(FileDownloader::new(config, multi_progress.clone(), limiter.clone(), state.clone()));

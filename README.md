@@ -6,7 +6,7 @@
 
 Asynchronous file downloader written in Rust. `grab` combines the simplicity of `wget` with the power of multi-threaded concurrency, parallel file downloads, and modern async I/O. Inspired by the efficiency of `pacman`.
 
-![intro](intro.png)
+![intro](docs/intro.png)
 
  <details>
   <summary>✨ Features</summary>
@@ -53,37 +53,37 @@ cargo build --release
 ## Usage
 
 ```bash
-grab [OPTIONS] <URL>...
+grab [OPTIONS] <URL> [CHECKSUM] ...
 # OR
 cat urls.txt | grab [OPTIONS]
 ```
 
 ### Examples
 
-**Basic Single Download**:
+**Basic Download**:
 ```bash
 ./grab https://example.com/file.zip
 ```
 
-**Multiple Parallel Downloads**:
+**With Checksum Verification**:
 ```bash
-./grab https://example.com/file1.zip https://example.com/file2.zip
+./grab https://example.com/file.zip sha256:e3b0c442...
 ```
 
-**Piping From a List**:
+**Piping From a List (supports URL CHECKSUM format)**:
 ```bash
 cat url_lists.txt | grab -j 10
 ```
 
-**Resume Interrupted Downloads**:
-```bash
-./grab -c https://example.com/large_file.iso
-```
+### Checksum Verification
+`grab` supports automatic checksum verification. You can provide a checksum after the URL. Supported formats:
+- `sha1:[hash]` or `sha1sum:[hash]`
+- `sha256:[hash]` or `sha256sum:[hash]`
+- `blake2:[hash]` or `b2sum:[hash]`
+- `blake3:[hash]` or `b3sum:[hash]`
+- (and others like sha224, sha384, sha512)
 
-**Limit Global Bandwidth**:
-```bash
-./grab --limit-rate 1M -j 5 https://example.com/file1.zip https://example.com/file2.zip
-```
+If a checksum is provided, `grab` will verify the file after download and inform you if it matches. If the check fails, the file is **not** deleted, allowing you to manually inspect it.
 
 ### Options
 

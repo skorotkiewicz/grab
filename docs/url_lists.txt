@@ -1,0 +1,5 @@
+https://github.com/skorotkiewicz/grab/releases/download/v2.1.2/grab-linux-aarch64 sha256:0cbbef534e1a960118a1a362952b799b3165bb54b1e181ff392634899a6b271f
+https://github.com/skorotkiewicz/grab/releases/download/v2.1.2/grab-linux-x86_64 sha256:949824d9a2a4f02b6887d86514a71275be20b902150d7c64acdb2960824b736b
+https://github.com/skorotkiewicz/grab/releases/download/v2.1.2/grab-macos-aarch64 sha256:6d7ade33ce5913aa68b73f0d560997358d25d63b129aba51632aff4ab98c63f5
+https://github.com/skorotkiewicz/grab/releases/download/v2.1.2/grab-macos-x86_64 sha256:a6d956fa7018ed01edd36693067b30689bb366cf00e9483bc60431eb3af9fcb5
+https://github.com/skorotkiewicz/grab/releases/download/v2.1.2/grab-windows-x86_64.exe b3sum:85b5fec9d65d25f00f069dc9bb4b49559b029bcbd9dcd300f4ef99087f118c7c
