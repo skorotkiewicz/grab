@@ -33,7 +33,7 @@ struct Args {
     resume: bool,
 
     /// Number of concurrent chunks per file
-    #[arg(short = 't', long, default_value_t = 4)]
+    #[arg(short = 't', long, default_value_t = 1)]
     threads: usize,
 
     /// Number of parallel file downloads
@@ -242,21 +242,31 @@ impl FileDownloader {
             .map(|h| h == "bytes")
             .unwrap_or(false);
 
+        let part_path = format!("{}.part", output_path);
         let mut already_downloaded = 0u64;
         let file_exists = Path::new(output_path).exists();
+        let part_exists = Path::new(&part_path).exists();
 
-        if self.config.resume && file_exists {
-            if let Ok(meta) = metadata(output_path).await {
-                already_downloaded = meta.len();
-                if already_downloaded >= total_size {
-                    pb.finish_with_message("Completed");
-                    return Ok(())
+        if self.config.resume {
+            if file_exists {
+                if let Ok(meta) = metadata(output_path).await {
+                    if meta.len() >= total_size {
+                        pb.finish_with_message("Completed");
+                        return Ok(())
+                    }
                 }
-                pb.set_position(already_downloaded);
-                self.state.total_pb.inc(already_downloaded);
             }
-        } else if file_exists {
-            File::create(output_path).await?;
+            if part_exists {
+                if let Ok(meta) = metadata(&part_path).await {
+                    already_downloaded = meta.len();
+                    pb.set_position(already_downloaded);
+                    self.state.total_pb.inc(already_downloaded);
+                }
+            }
+        }
+
+        if !part_exists || !self.config.resume {
+            File::create(&part_path).await?;
         }
 
         let res = if supports_range && !self.config.resume && total_size > self.config.chunk_size {
@@ -269,14 +279,26 @@ impl FileDownloader {
         self.state.total_pb.set_message(format!("({}/{})", finished, self.state.total_files));
         
         if res.is_ok() {
+            // Verify final size
+            if let Ok(meta) = metadata(&part_path).await {
+                if meta.len() != total_size && total_size > 0 {
+                    pb.finish_with_message(format!("Size mismatch: expected {}, got {}", total_size, meta.len()));
+                    return Err("Size mismatch".into());
+                }
+            }
+
             if let Some(ref checksum) = self.config.checksum {
                 pb.set_message("Verifying...");
-                match self.verify_checksum(checksum).await {
-                    Ok(true) => pb.finish_with_message("Verified"),
+                match self.verify_checksum(checksum, &part_path).await {
+                    Ok(true) => {
+                        tokio::fs::rename(&part_path, output_path).await?;
+                        pb.finish_with_message("Verified");
+                    },
                     Ok(false) => pb.finish_with_message("Checksum mismatch!"),
                     Err(e) => pb.finish_with_message(format!("Verification error: {}", e)),
                 }
             } else {
+                tokio::fs::rename(&part_path, output_path).await?;
                 pb.finish();
             }
         }
@@ -284,8 +306,8 @@ impl FileDownloader {
         res
     }
 
-    async fn verify_checksum(&self, checksum: &Checksum) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        let mut file = File::open(&self.config.output_path).await?;
+    async fn verify_checksum(&self, checksum: &Checksum, path: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let mut file = File::open(path).await?;
         let mut buffer = vec![0u8; 8192];
         
         match checksum {
@@ -361,15 +383,26 @@ impl FileDownloader {
             headers.insert(RANGE, format!("bytes={}-", start_pos).parse().unwrap());
         }
 
-        let mut response = tokio::time::timeout(
+        let response = tokio::time::timeout(
             self.config.timeout,
             self.client.get(&self.config.url).headers(headers).send()
         ).await??;
 
+        if start_pos > 0 && response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err("Server does not support resume (Range request ignored)".into());
+        }
+
+        if !response.status().is_success() {
+            return Err(format!("Server returned error: {}", response.status()).into());
+        }
+
+        let mut response = response;
+
+        let part_path = format!("{}.part", self.config.output_path);
         let mut file = if start_pos > 0 {
-            OpenOptions::new().write(true).open(&self.config.output_path).await?
+            OpenOptions::new().write(true).open(&part_path).await?
         } else {
-            File::create(&self.config.output_path).await?
+            File::create(&part_path).await?
         };
 
         if start_pos > 0 {
@@ -399,7 +432,8 @@ impl FileDownloader {
         let pb = Arc::new(pb);
         let mut handles = Vec::new();
 
-        File::create(&self.config.output_path).await?;
+        let part_path = format!("{}.part", self.config.output_path);
+        File::create(&part_path).await?;
 
         for i in 0..num_chunks {
             let chunk_range_size = total_size / num_chunks as u64;
@@ -412,7 +446,7 @@ impl FileDownloader {
 
             let client = self.client.clone();
             let url = self.config.url.clone();
-            let output_path = self.config.output_path.clone();
+            let output_path = part_path.clone();
             let pb_clone = pb.clone();
             let semaphore_clone = semaphore.clone();
 
@@ -450,10 +484,16 @@ async fn download_chunk(
     let mut headers = HeaderMap::new();
     headers.insert(RANGE, format!("bytes={}-{}", start, end).parse().unwrap());
 
-    let mut response = tokio::time::timeout(
+    let response = tokio::time::timeout(
         timeout,
         client.get(&url).headers(headers).send()
     ).await??;
+    
+    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err("Server did not return partial content for chunk request".into());
+    }
+
+    let mut response = response;
     
     let mut file = OpenOptions::new()
         .write(true)
