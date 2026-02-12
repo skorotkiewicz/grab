@@ -1,13 +1,72 @@
-use std::fs::{File, OpenOptions};
-use std::io::{self, Write, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::header::{HeaderMap, RANGE};
 use reqwest::Client;
-use tokio::fs::metadata;
+use tokio::fs::{metadata, File, OpenOptions};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Semaphore;
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(name = "downloader")]
+#[command(about = "An asynchronous file downloader", arg_required_else_help = true)]
+struct Args {
+    /// URL to download
+    #[arg(required = true)]
+    url: String,
+
+    /// Output file (optional, derived from URL if missing)
+    #[arg(short = 'O', long)]
+    output: Option<String>,
+
+    /// Resume download
+    #[arg(short = 'c', long, default_value_t = false)]
+    resume: bool,
+
+    /// Number of concurrent connections
+    #[arg(short = 't', long, default_value_t = 4)]
+    threads: usize,
+
+    /// Chunk size in bytes
+    #[arg(short = 's', long, default_value_t = 1048576)]
+    chunk_size: u64,
+
+    /// User Agent string
+    #[arg(short = 'u', long, default_value = "RustDownloader/1.0")]
+    user_agent: String,
+
+    /// Timeout in seconds
+    #[arg(short = 'T', long, default_value = "30", value_parser = parse_duration)]
+    timeout: Duration,
+
+    /// Bandwidth limit (e.g. 512K, 1M, 2M)
+    #[arg(short = 'l', long, value_parser = parse_bandwidth)]
+    limit_rate: Option<u64>,
+}
+
+fn parse_bandwidth(arg: &str) -> Result<u64, String> {
+    let s = arg.to_uppercase();
+    let (num_str, multiplier) = if s.ends_with('K') {
+        (&s[..s.len() - 1], 1024)
+    } else if s.ends_with('M') {
+        (&s[..s.len() - 1], 1024 * 1024)
+    } else if s.ends_with('G') {
+        (&s[..s.len() - 1], 1024 * 1024 * 1024)
+    } else {
+        (s.as_str(), 1)
+    };
+
+    num_str.parse::<u64>()
+        .map(|n| n * multiplier)
+        .map_err(|e| format!("Invalid bandwidth limit: {}", e))
+}
+
+fn parse_duration(arg: &str) -> Result<Duration, std::num::ParseIntError> {
+    let seconds = arg.parse::<u64>()?;
+    Ok(Duration::from_secs(seconds))
+}
 
 #[derive(Debug)]
 struct DownloadConfig {
@@ -18,44 +77,36 @@ struct DownloadConfig {
     resume: bool,
     user_agent: String,
     timeout: Duration,
+    limit_rate: Option<u64>,
 }
 
-#[derive(Debug)]
-struct DownloadStats {
-    total_size: u64,
-    downloaded: u64,
-    start_time: Instant,
+struct BandwidthLimiter {
+    bytes_per_second: u64,
+    start_instant: tokio::time::Instant,
+    total_bytes_transferred: std::sync::atomic::AtomicU64,
 }
 
-impl DownloadStats {
-    fn new(total_size: u64, already_downloaded: u64) -> Self {
+impl BandwidthLimiter {
+    fn new(bytes_per_second: u64) -> Self {
         Self {
-            total_size,
-            downloaded: already_downloaded,
-            start_time: Instant::now(),
+            bytes_per_second,
+            start_instant: tokio::time::Instant::now(),
+            total_bytes_transferred: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    fn update(&mut self, bytes: u64) {
-        self.downloaded += bytes;
-    }
-
-    fn speed(&self) -> f64 {
-        let elapsed = self.start_time.elapsed().as_secs_f64();
-        if elapsed > 0.0 {
-            self.downloaded as f64 / elapsed
-        } else {
-            0.0
+    async fn throttle(&self, bytes: u64) {
+        if self.bytes_per_second == 0 {
+            return;
         }
-    }
 
-    fn eta(&self) -> Duration {
-        let speed = self.speed();
-        if speed > 0.0 {
-            let remaining = self.total_size - self.downloaded;
-            Duration::from_secs_f64(remaining as f64 / speed)
-        } else {
-            Duration::from_secs(0)
+        let total = self.total_bytes_transferred.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed) + bytes;
+        
+        let elapsed = self.start_instant.elapsed();
+        let expected_duration = Duration::from_secs_f64(total as f64 / self.bytes_per_second as f64);
+
+        if elapsed < expected_duration {
+            tokio::time::sleep(expected_duration - elapsed).await;
         }
     }
 }
@@ -63,23 +114,25 @@ impl DownloadStats {
 struct FileDownloader {
     client: Client,
     config: DownloadConfig,
+    limiter: Option<Arc<BandwidthLimiter>>,
 }
 
 impl FileDownloader {
     fn new(config: DownloadConfig) -> Self {
         let client = Client::builder()
             .user_agent(&config.user_agent)
-            .timeout(config.timeout)
+            .connect_timeout(config.timeout)
             .build()
             .expect("Failed to create HTTP client");
 
-        Self { client, config }
+        let limiter = config.limit_rate.map(|limit| Arc::new(BandwidthLimiter::new(limit)));
+
+        Self { client, config, limiter }
     }
 
     async fn download(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("🚀 Starting download from: {}", self.config.url);
+        println!("Downloading: {}", self.config.url);
         
-        // Get file info
         let response = self.client.head(&self.config.url).send().await?;
         let total_size = response
             .headers()
@@ -89,7 +142,7 @@ impl FileDownloader {
             .unwrap_or(0);
 
         if total_size == 0 {
-            return self.download_single_threaded().await;
+            return self.download_single_threaded(0).await;
         }
 
         let supports_range = response
@@ -98,67 +151,84 @@ impl FileDownloader {
             .map(|h| h == "bytes")
             .unwrap_or(false);
 
-        println!("📊 File size: {} bytes", format_bytes(total_size));
-        println!("🔄 Range requests supported: {}", supports_range);
+        println!("Length: {}", format_bytes(total_size));
 
-        // Check if file exists and get current size
         let mut already_downloaded = 0u64;
-        if self.config.resume && Path::new(&self.config.output_path).exists() {
+        let file_exists = Path::new(&self.config.output_path).exists();
+
+        if self.config.resume && file_exists {
             if let Ok(meta) = metadata(&self.config.output_path).await {
                 already_downloaded = meta.len();
                 if already_downloaded >= total_size {
-                    println!("✅ File already fully downloaded!");
-                    return Ok(());
+                    println!("File already fully downloaded.");
+                    return Ok(())
                 }
-                println!("⏯️  Resuming download from {} bytes", already_downloaded);
+                println!("Resuming from {}", format_bytes(already_downloaded));
             }
+        } else if file_exists {
+            File::create(&self.config.output_path).await?;
         }
 
-        if supports_range && total_size > self.config.chunk_size {
-            self.download_multi_threaded(total_size, already_downloaded).await
+        if supports_range && !self.config.resume && total_size > self.config.chunk_size {
+            // Multi-threading is only safe for fresh downloads to avoid holes
+            self.download_multi_threaded(total_size).await
         } else {
-            self.download_single_threaded().await
+            // For resume or non-range servers, use reliable sequential download
+            self.download_single_threaded(already_downloaded).await
         }
     }
 
-    async fn download_single_threaded(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut response = self.client.get(&self.config.url).send().await?;
-        let total_size = response.content_length().unwrap_or(0);
+    async fn download_single_threaded(&self, start_pos: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut headers = HeaderMap::new();
+        if start_pos > 0 {
+            headers.insert(RANGE, format!("bytes={}-", start_pos).parse().unwrap());
+        }
+
+        let mut response = tokio::time::timeout(
+            self.config.timeout,
+            self.client.get(&self.config.url).headers(headers).send()
+        ).await??;
+        let total_size = response.content_length().unwrap_or(0) + start_pos;
 
         let pb = ProgressBar::new(total_size);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
                 .unwrap()
-                .progress_chars("#>-"),
+                .progress_chars("=>-"),
+                // .progress_chars("██▉▊▋▌▍▎▏  "),
         );
+        pb.set_position(start_pos);
 
-        let mut file = File::create(&self.config.output_path)?;
-        let mut downloaded = 0u64;
+        let mut file = if start_pos > 0 {
+            OpenOptions::new().write(true).open(&self.config.output_path).await?
+        } else {
+            File::create(&self.config.output_path).await?
+        };
 
-        while let Some(chunk) = response.chunk().await? {
-            file.write_all(&chunk)?;
-            downloaded += chunk.len() as u64;
-            pb.set_position(downloaded);
+        if start_pos > 0 {
+            file.seek(SeekFrom::Start(start_pos)).await?;
         }
 
-        pb.finish_with_message("✅ Download completed!");
-        println!("💾 File saved to: {}", self.config.output_path);
+        while let Some(chunk) = tokio::time::timeout(self.config.timeout, response.chunk()).await?? {
+            file.write_all(&chunk).await?;
+            pb.inc(chunk.len() as u64);
+            if let Some(ref limiter) = self.limiter {
+                limiter.throttle(chunk.len() as u64).await;
+            }
+        }
+
+        pb.finish_with_message("Download completed.");
         Ok(())
     }
 
-    async fn download_multi_threaded(
-        &self,
-        total_size: u64,
-        already_downloaded: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let remaining = total_size - already_downloaded;
+    async fn download_multi_threaded(&self, total_size: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let num_chunks = std::cmp::min(
             self.config.concurrent_chunks,
-            (remaining / self.config.chunk_size + 1) as usize,
+            (total_size / self.config.chunk_size + 1) as usize,
         );
 
-        println!("🧵 Using {} concurrent connections", num_chunks);
+        println!("Using {} concurrent connections", num_chunks);
 
         let pb = ProgressBar::new(total_size);
         pb.set_style(
@@ -166,19 +236,23 @@ impl FileDownloader {
                 .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
                 .unwrap()
                 .progress_chars("██▉▊▋▌▍▎▏  "),
+                // .progress_chars("=>-"),
         );
-        pb.set_position(already_downloaded);
 
         let semaphore = Arc::new(Semaphore::new(num_chunks));
         let pb = Arc::new(pb);
         let mut handles = Vec::new();
 
+        // For multi-threaded writing without gaps, we pre-create the file empty
+        File::create(&self.config.output_path).await?;
+
         for i in 0..num_chunks {
-            let start = already_downloaded + (i as u64 * remaining / num_chunks as u64);
+            let chunk_range_size = total_size / num_chunks as u64;
+            let start = i as u64 * chunk_range_size;
             let end = if i == num_chunks - 1 {
                 total_size - 1
             } else {
-                already_downloaded + ((i + 1) as u64 * remaining / num_chunks as u64) - 1
+                ((i + 1) as u64 * chunk_range_size) - 1
             };
 
             let client = self.client.clone();
@@ -187,21 +261,21 @@ impl FileDownloader {
             let pb_clone = pb.clone();
             let semaphore_clone = semaphore.clone();
 
+            let timeout = self.config.timeout;
+            let limiter = self.limiter.clone();
             let handle = tokio::spawn(async move {
                 let _permit = semaphore_clone.acquire().await.unwrap();
-                download_chunk(client, url, output_path, start, end, pb_clone).await
+                download_chunk(client, url, output_path, start, end, pb_clone, timeout, limiter).await
             });
 
             handles.push(handle);
         }
 
-        // Wait for all chunks to complete
         for handle in handles {
             handle.await??;
         }
 
-        pb.finish_with_message("✅ Download completed!");
-        println!("💾 File saved to: {}", self.config.output_path);
+        pb.finish_with_message("Download completed.");
         Ok(())
     }
 }
@@ -213,22 +287,29 @@ async fn download_chunk(
     start: u64,
     end: u64,
     pb: Arc<ProgressBar>,
+    timeout: Duration,
+    limiter: Option<Arc<BandwidthLimiter>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut headers = HeaderMap::new();
     headers.insert(RANGE, format!("bytes={}-{}", start, end).parse().unwrap());
 
-    let mut response = client.get(&url).headers(headers).send().await?;
+    let mut response = tokio::time::timeout(
+        timeout,
+        client.get(&url).headers(headers).send()
+    ).await??;
     
     let mut file = OpenOptions::new()
         .write(true)
-        .create(true)
-        .open(&output_path)?;
+        .open(&output_path).await?;
     
-    file.seek(SeekFrom::Start(start))?;
+    file.seek(SeekFrom::Start(start)).await?;
 
-    while let Some(chunk) = response.chunk().await? {
-        file.write_all(&chunk)?;
+    while let Some(chunk) = tokio::time::timeout(timeout, response.chunk()).await?? {
+        file.write_all(&chunk).await?;
         pb.inc(chunk.len() as u64);
+        if let Some(ref lim) = limiter {
+            lim.throttle(chunk.len() as u64).await;
+        }
     }
 
     Ok(())
@@ -247,247 +328,37 @@ fn format_bytes(bytes: u64) -> String {
     format!("{:.2} {}", size, UNITS[unit_index])
 }
 
-fn get_user_input(prompt: &str) -> String {
-    print!("{}", prompt);
-    io::stdout().flush().unwrap();
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    input.trim().to_string()
-}
-
-fn get_number_input<T>(prompt: &str, default: T) -> T
-where
-    T: std::str::FromStr + std::fmt::Display + Copy,
-{
-    loop {
-        let input = get_user_input(&format!("{} (default: {}): ", prompt, default));
-        if input.is_empty() {
-            return default;
-        }
-        
-        match input.parse::<T>() {
-            Ok(value) => return value,
-            Err(_) => {
-                println!("❌ Invalid input. Please enter a valid number.");
-                continue;
-            }
-        }
-    }
-}
-
-fn get_yes_no_input(prompt: &str, default: bool) -> bool {
-    loop {
-        let default_str = if default { "Y/n" } else { "y/N" };
-        let input = get_user_input(&format!("{} ({}): ", prompt, default_str));
-        
-        if input.is_empty() {
-            return default;
-        }
-        
-        match input.to_lowercase().as_str() {
-            "y" | "yes" | "true" => return true,
-            "n" | "no" | "false" => return false,
-            _ => {
-                println!("❌ Please enter 'y' for yes or 'n' for no.");
-                continue;
-            }
-        }
-    }
-}
-
-fn display_banner() {
-    println!("╔══════════════════════════════════════════════╗");
-    println!("║            🦀 Rust File Downloader           ║");
-    println!("║                 Version 1.0.0                ║");
-    println!("╚══════════════════════════════════════════════╝");
-    println!();
-}
-
-fn display_config(config: &DownloadConfig) {
-    println!("📋 Download Configuration:");
-    println!("┌─────────────────────────────────────────────────────────────┐");
-    println!("│ URL:              {:<40} │", truncate_string(&config.url, 40));
-    println!("│ Output File:      {:<40} │", truncate_string(&config.output_path, 40));
-    println!("│ Connections:      {:<40} │", config.concurrent_chunks);
-    println!("│ Chunk Size:       {:<40} │", format_bytes(config.chunk_size));
-    println!("│ Resume:           {:<40} │", if config.resume { "Yes" } else { "No" });
-    println!("│ User Agent:       {:<40} │", truncate_string(&config.user_agent, 40));
-    println!("│ Timeout:          {:<40} │", format!("{}s", config.timeout.as_secs()));
-    println!("└─────────────────────────────────────────────────────────────┘");
-    println!();
-}
-
-fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len-3])
-    }
-}
-
-fn create_interactive_config() -> DownloadConfig {
-    println!("🔧 Let's configure your download!\n");
-    
-    // Get URL
-    let url = loop {
-        let input = get_user_input("🌐 Enter the download URL: ");
-        if input.trim().is_empty() {
-            println!("❌ URL cannot be empty. Please try again.");
-            continue;
-        }
-        
-        if !input.starts_with("http://") && !input.starts_with("https://") {
-            println!("⚠️  Warning: URL should start with http:// or https://");
-            if !get_yes_no_input("Continue anyway?", false) {
-                continue;
-            }
-        }
-        
-        break input;
-    };
-    
-    // Get output filename
-    let default_filename = url.split('/').last().unwrap_or("downloaded_file").to_string();
-    let output_path = loop {
-        let input = get_user_input(&format!("💾 Output filename (default: {}): ", default_filename));
-        if input.is_empty() {
-            break default_filename.clone();
-        }
-        
-        // Check if file already exists
-        if Path::new(&input).exists() {
-            println!("⚠️  File '{}' already exists.", input);
-            if get_yes_no_input("Overwrite/resume this file?", true) {
-                break input;
-            }
-            continue;
-        }
-        
-        break input;
-    };
-    
-    // Get number of concurrent connections
-    let concurrent_chunks = get_number_input("🧵 Number of concurrent connections", 4usize);
-    
-    // Get chunk size
-    println!("\n📦 Chunk size options:");
-    println!("  1. 512 KB  (slow connection)");
-    println!("  2. 1 MB    (recommended)");
-    println!("  3. 2 MB    (fast connection)");
-    println!("  4. 4 MB    (very fast connection)");
-    println!("  5. Custom");
-    
-    let chunk_size = loop {
-        let choice = get_number_input("Select chunk size", 2u32);
-        match choice {
-            1 => break 512 * 1024,      // 512 KB
-            2 => break 1024 * 1024,     // 1 MB
-            3 => break 2 * 1024 * 1024, // 2 MB
-            4 => break 4 * 1024 * 1024, // 4 MB
-            5 => {
-                let custom = get_number_input("Enter chunk size in bytes", 1048576u64);
-                break custom;
-            }
-            _ => {
-                println!("❌ Please select a valid option (1-5).");
-                continue;
-            }
-        }
-    };
-    
-    // Resume option
-    let resume = if Path::new(&output_path).exists() {
-        get_yes_no_input("📂 Resume existing download?", true)
-    } else {
-        get_yes_no_input("📂 Enable resume capability?", true)
-    };
-    
-    // User agent
-    println!("\n🤖 User Agent options:");
-    println!("  1. Default (RustDownloader/1.0)");
-    println!("  2. Firefox");
-    println!("  3. Chrome");
-    println!("  4. Custom");
-    
-    let user_agent = loop {
-        let choice = get_number_input("Select user agent", 1u32);
-        match choice {
-            1 => break "RustDownloader/1.0".to_string(),
-            2 => break "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:91.0) Gecko/20100101 Firefox/91.0".to_string(),
-            3 => break "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36".to_string(),
-            4 => {
-                let custom = get_user_input("Enter custom user agent: ");
-                if custom.is_empty() {
-                    println!("❌ User agent cannot be empty.");
-                    continue;
-                }
-                break custom;
-            }
-            _ => {
-                println!("❌ Please select a valid option (1-4).");
-                continue;
-            }
-        }
-    };
-    
-    // Timeout
-    let timeout_secs = get_number_input("⏱️  Request timeout in seconds", 30u64);
-    let timeout = Duration::from_secs(timeout_secs);
-    
-    DownloadConfig {
-        url,
-        output_path,
-        concurrent_chunks,
-        chunk_size,
-        resume,
-        user_agent,
-        timeout,
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    display_banner();
+    let args = Args::parse();
     
-    // Create configuration interactively
-    let config = create_interactive_config();
-    
-    println!();
-    display_config(&config);
-    
-    // Confirm before starting
-    if !get_yes_no_input("🚀 Start download?", true) {
-        println!("❌ Download cancelled.");
-        return Ok(());
-    }
-    
-    println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("🚀 Starting download...");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    let output_path = args.output.unwrap_or_else(|| {
+        args.url
+            .split('/')
+            .last()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("index.html")
+            .to_string()
+    });
 
+    let config = DownloadConfig {
+        url: args.url,
+        output_path,
+        concurrent_chunks: args.threads,
+        chunk_size: args.chunk_size,
+        resume: args.resume,
+        user_agent: args.user_agent,
+        timeout: args.timeout,
+        limit_rate: args.limit_rate,
+    };
+
+    
     let downloader = FileDownloader::new(config);
     
-    match downloader.download().await {
-        Ok(()) => {
-            println!("\n🎉 Download completed successfully!");
-            println!("Press Enter to exit...");
-            let _ = get_user_input("");
-        }
-        Err(e) => {
-            println!("\n❌ Download failed: {}", e);
-            println!("Press Enter to exit...");
-            let _ = get_user_input("");
-            return Err(e);
-        }
+    if let Err(e) = downloader.download().await {
+        eprintln!("\nError: Download failed: {}", e);
+        std::process::exit(1);
     }
 
     Ok(())
 }
-
-// Cargo.toml dependencies needed:
-/*
-[dependencies]
-reqwest = { version = "0.11", features = ["stream"] }
-tokio = { version = "1.0", features = ["full"] }
-indicatif = "0.17"
-*/
