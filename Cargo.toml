@@ -1,7 +1,7 @@
 [package]
-name = "rust-downloader"
-version = "1.0.0"
-edition = "2021"
+name = "grab"
+version = "2.0.0"
+edition = "2024"
 
 [[bin]]
 name = "grab"

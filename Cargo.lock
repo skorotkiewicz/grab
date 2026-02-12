@@ -402,6 +402,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "grab"
+version = "2.0.0"
+dependencies = [
+ "clap",
+ "indicatif",
+ "reqwest",
+ "tokio",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1039,16 +1049,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rust-downloader"
-version = "1.0.0"
-dependencies = [
- "clap",
- "indicatif",
- "reqwest",
- "tokio",
 ]
 
 [[package]]

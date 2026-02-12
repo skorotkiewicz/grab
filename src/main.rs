@@ -10,8 +10,8 @@ use tokio::sync::Semaphore;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "downloader")]
-#[command(about = "An asynchronous file downloader", arg_required_else_help = true)]
+#[command(name = "grab")]
+#[command(about = "Asynchronous file downloader", arg_required_else_help = true)]
 struct Args {
     /// URL to download
     #[arg(required = true)]
@@ -34,7 +34,7 @@ struct Args {
     chunk_size: u64,
 
     /// User Agent string
-    #[arg(short = 'u', long, default_value = "RustDownloader/1.0")]
+    #[arg(short = 'u', long, default_value = "Grab/2.0")]
     user_agent: String,
 
     /// Timeout in seconds
