@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)]()
 
-A high-performance asynchronous file downloader written in Rust. `grab` combines the simplicity of `wget` with the power of multi-threaded concurrency, parallel file downloads, and modern async I/O. Inspired by the efficiency of `pacman`.
+Asynchronous file downloader written in Rust. `grab` combines the simplicity of `wget` with the power of multi-threaded concurrency, parallel file downloads, and modern async I/O. Inspired by the efficiency of `pacman`.
 
 ![intro](intro.png)
 
@@ -131,5 +131,5 @@ Unlike simple request timeouts, `grab` monitors the *flow* of data. If the serve
 
 ---
 
-**Made with ❤️ in Rust**
+**Made with ❤️ in Rust**  
 *Fast, light, and reliable.* 🚀
