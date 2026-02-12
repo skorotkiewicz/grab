@@ -86,7 +86,7 @@ grab [OPTIONS] <URL>
 | `-c` | `--resume` | Resume partial download | `false` |
 | `-t` | `--threads` | Concurrent connections | `4` |
 | `-s` | `--chunk-size` | Chunk size in bytes | `1048576` (1MB) |
-| `-u` | `--user-agent` | HTTP User-Agent string | `RustDownloader/1.0` |
+| `-u` | `--user-agent` | HTTP User-Agent string | `Grab/2.0` |
 | `-T` | `--timeout` | Inactivity timeout (seconds) | `30` |
 | `-l` | `--limit-rate` | Bandwidth limit (e.g. 512K, 1M) | None |
 
