@@ -1,6 +1,6 @@
 [package]
 name = "grab"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2024"
 
 [[bin]]
@@ -12,3 +12,12 @@ reqwest = { version = "0.13", features = ["stream"] }
 tokio = { version = "1.0", features = ["full"] }
 indicatif = "0.18"
 clap = { version = "4.0", features = ["derive"] }
+
+[profile.release]
+opt-level = 3          # Maximum optimizations
+debug = false          # No debug info (smaller binary)
+lto = "fat"            # Link‑time optimization
+codegen-units = 1      # Better optimization, slower compile
+panic = "abort"        # Smaller binary, no unwind tables
+incremental = false    # Disable incremental compilation
+strip = true           # Remove symbol table (requires Rust 1.71+)
