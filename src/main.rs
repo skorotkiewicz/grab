@@ -11,7 +11,7 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name = "grab")]
-#[command(about = "Asynchronous file downloader", arg_required_else_help = true)]
+#[command(about = "Asynchronous file downloader")]
 struct Args {
     /// URLs to download
     #[arg(num_args = 0..)]
@@ -313,20 +313,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     // Read from stdin if no URLs provided
     if args.urls.is_empty() {
-        use tokio::io::AsyncBufReadExt;
-        let stdin = tokio::io::stdin();
-        let mut reader = tokio::io::BufReader::new(stdin).lines();
-        while let Some(line) = reader.next_line().await? {
-            let line = line.trim();
-            if !line.is_empty() {
-                args.urls.push(line.to_string());
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            use tokio::io::AsyncBufReadExt;
+            let stdin = tokio::io::stdin();
+            let mut reader = tokio::io::BufReader::new(stdin).lines();
+            while let Some(line) = reader.next_line().await? {
+                let line = line.trim();
+                if !line.is_empty() {
+                    args.urls.push(line.to_string());
+                }
             }
         }
     }
 
     if args.urls.is_empty() {
-        println!("Usage: grab [OPTIONS] <URL>...");
-        println!("Or pipe URLs to grab: cat urls.txt | grab [OPTIONS]");
+        use clap::CommandFactory;
+        Args::command().print_help()?;
+        println!();
         return Ok(());
     }
 
