@@ -150,7 +150,7 @@ impl FileDownloader {
             .and_then(|ct_len| ct_len.parse().ok())
             .unwrap_or(0);
 
-        let pb = self.multi_progress.add(ProgressBar::new(total_size));
+        let pb = self.multi_progress.insert(0, ProgressBar::new(total_size));
         pb.set_style(
             ProgressStyle::default_bar()
                 .template(&format!(" {{prefix:<16}} {{bytes:>10}}/{{total_bytes:<10}} {{bytes_per_sec:>12}} {{eta:>6}} [{{wide_bar}}] {{percent:>3}}%"))
