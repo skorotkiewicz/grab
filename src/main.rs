@@ -1,19 +1,19 @@
+use clap::Parser;
+use indicatif::{ProgressBar, ProgressStyle};
+use reqwest::Client;
+use reqwest::header::{HeaderMap, RANGE};
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::header::{HeaderMap, RANGE};
-use reqwest::Client;
-use tokio::fs::{metadata, File, OpenOptions};
+use tokio::fs::{File, OpenOptions, metadata};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::sync::Semaphore;
-use std::net::IpAddr;
-use clap::Parser;
 // Hashing algorithms
-use sha1::Sha1;
-use sha2::{Sha224, Sha256, Sha384, Sha512, Digest};
 use blake2::Blake2b512;
 use blake3;
+use sha1::Sha1;
+use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 use tokio::io::AsyncReadExt;
 
 #[derive(Parser, Debug)]
@@ -81,7 +81,8 @@ fn parse_bandwidth(arg: &str) -> Result<u64, String> {
         (s.as_str(), 1)
     };
 
-    num_str.parse::<u64>()
+    num_str
+        .parse::<u64>()
         .map(|n| n * multiplier)
         .map_err(|e| format!("Invalid bandwidth limit: {}", e))
 }
@@ -157,10 +158,14 @@ impl BandwidthLimiter {
             return;
         }
 
-        let total = self.total_bytes_transferred.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed) + bytes;
-        
+        let total = self
+            .total_bytes_transferred
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed)
+            + bytes;
+
         let elapsed = self.start_instant.elapsed();
-        let expected_duration = Duration::from_secs_f64(total as f64 / self.bytes_per_second as f64);
+        let expected_duration =
+            Duration::from_secs_f64(total as f64 / self.bytes_per_second as f64);
 
         if elapsed < expected_duration {
             tokio::time::sleep(expected_duration - elapsed).await;
@@ -173,7 +178,6 @@ struct DownloadState {
     total_pb: ProgressBar,
 }
 
-
 struct FileDownloader {
     client: Client,
     config: Arc<DownloadConfig>,
@@ -183,7 +187,12 @@ struct FileDownloader {
 }
 
 impl FileDownloader {
-    fn new(config: DownloadConfig, multi_progress: indicatif::MultiProgress, limiter: Option<Arc<BandwidthLimiter>>, state: Arc<DownloadState>) -> Self {
+    fn new(
+        config: DownloadConfig,
+        multi_progress: indicatif::MultiProgress,
+        limiter: Option<Arc<BandwidthLimiter>>,
+        state: Arc<DownloadState>,
+    ) -> Self {
         let mut builder = Client::builder()
             .user_agent(&config.user_agent)
             .connect_timeout(config.timeout);
@@ -194,12 +203,11 @@ impl FileDownloader {
             builder = builder.local_address(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED));
         }
 
-        let client = builder.build()
-            .expect("Failed to create HTTP client");
+        let client = builder.build().expect("Failed to create HTTP client");
 
-        Self { 
-            client, 
-            config: Arc::new(config), 
+        Self {
+            client,
+            config: Arc::new(config),
             limiter,
             multi_progress,
             state,
@@ -209,7 +217,10 @@ impl FileDownloader {
     async fn download(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = &self.config.url;
         let output_path = &self.config.output_path;
-        let filename = Path::new(output_path).file_name().and_then(|n| n.to_str()).unwrap_or("file");
+        let filename = Path::new(output_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file");
 
         let response = self.client.head(url).send().await?;
         let total_size = response
@@ -252,7 +263,7 @@ impl FileDownloader {
                 if let Ok(meta) = metadata(output_path).await {
                     if meta.len() >= total_size {
                         pb.finish_with_message("Completed");
-                        return Ok(())
+                        return Ok(());
                     }
                 }
             }
@@ -272,17 +283,28 @@ impl FileDownloader {
         let res = if supports_range && !self.config.resume && total_size > self.config.chunk_size {
             self.download_multi_threaded(total_size, pb.clone()).await
         } else {
-            self.download_single_threaded(already_downloaded, pb.clone()).await
+            self.download_single_threaded(already_downloaded, pb.clone())
+                .await
         };
 
-        let finished = self.state.finished_files.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        self.state.total_pb.set_message(format!("({}/{})", finished, self.state.total_files));
-        
+        let finished = self
+            .state
+            .finished_files
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        self.state
+            .total_pb
+            .set_message(format!("({}/{})", finished, self.state.total_files));
+
         if res.is_ok() {
             // Verify final size
             if let Ok(meta) = metadata(&part_path).await {
                 if meta.len() != total_size && total_size > 0 {
-                    pb.finish_with_message(format!("Size mismatch: expected {}, got {}", total_size, meta.len()));
+                    pb.finish_with_message(format!(
+                        "Size mismatch: expected {}, got {}",
+                        total_size,
+                        meta.len()
+                    ));
                     return Err("Size mismatch".into());
                 }
             }
@@ -293,7 +315,7 @@ impl FileDownloader {
                     Ok(true) => {
                         tokio::fs::rename(&part_path, output_path).await?;
                         pb.finish_with_message("Verified");
-                    },
+                    }
                     Ok(false) => pb.finish_with_message("Checksum mismatch!"),
                     Err(e) => pb.finish_with_message(format!("Verification error: {}", e)),
                 }
@@ -306,15 +328,21 @@ impl FileDownloader {
         res
     }
 
-    async fn verify_checksum(&self, checksum: &Checksum, path: &str) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    async fn verify_checksum(
+        &self,
+        checksum: &Checksum,
+        path: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         let mut file = File::open(path).await?;
         let mut buffer = vec![0u8; 8192];
-        
+
         match checksum {
             Checksum::Sha1(expected) => {
                 let mut hasher = Sha1::new();
                 while let Ok(n) = file.read(&mut buffer).await {
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     hasher.update(&buffer[..n]);
                 }
                 let hash = hex::encode(hasher.finalize());
@@ -323,7 +351,9 @@ impl FileDownloader {
             Checksum::Sha224(expected) => {
                 let mut hasher = Sha224::new();
                 while let Ok(n) = file.read(&mut buffer).await {
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     hasher.update(&buffer[..n]);
                 }
                 let hash = hex::encode(hasher.finalize());
@@ -332,7 +362,9 @@ impl FileDownloader {
             Checksum::Sha256(expected) => {
                 let mut hasher = Sha256::new();
                 while let Ok(n) = file.read(&mut buffer).await {
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     hasher.update(&buffer[..n]);
                 }
                 let hash = hex::encode(hasher.finalize());
@@ -341,7 +373,9 @@ impl FileDownloader {
             Checksum::Sha384(expected) => {
                 let mut hasher = Sha384::new();
                 while let Ok(n) = file.read(&mut buffer).await {
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     hasher.update(&buffer[..n]);
                 }
                 let hash = hex::encode(hasher.finalize());
@@ -350,7 +384,9 @@ impl FileDownloader {
             Checksum::Sha512(expected) => {
                 let mut hasher = Sha512::new();
                 while let Ok(n) = file.read(&mut buffer).await {
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     hasher.update(&buffer[..n]);
                 }
                 let hash = hex::encode(hasher.finalize());
@@ -359,7 +395,9 @@ impl FileDownloader {
             Checksum::Blake2b(expected) => {
                 let mut hasher = Blake2b512::new();
                 while let Ok(n) = file.read(&mut buffer).await {
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     hasher.update(&buffer[..n]);
                 }
                 let hash = hex::encode(hasher.finalize());
@@ -368,7 +406,9 @@ impl FileDownloader {
             Checksum::Blake3(expected) => {
                 let mut hasher = blake3::Hasher::new();
                 while let Ok(n) = file.read(&mut buffer).await {
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     hasher.update(&buffer[..n]);
                 }
                 let hash = hasher.finalize().to_hex().to_string();
@@ -377,7 +417,11 @@ impl FileDownloader {
         }
     }
 
-    async fn download_single_threaded(&self, start_pos: u64, pb: ProgressBar) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn download_single_threaded(
+        &self,
+        start_pos: u64,
+        pb: ProgressBar,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut headers = HeaderMap::new();
         if start_pos > 0 {
             headers.insert(RANGE, format!("bytes={}-", start_pos).parse().unwrap());
@@ -385,8 +429,9 @@ impl FileDownloader {
 
         let response = tokio::time::timeout(
             self.config.timeout,
-            self.client.get(&self.config.url).headers(headers).send()
-        ).await??;
+            self.client.get(&self.config.url).headers(headers).send(),
+        )
+        .await??;
 
         if start_pos > 0 && response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
             return Err("Server does not support resume (Range request ignored)".into());
@@ -409,7 +454,9 @@ impl FileDownloader {
             file.seek(SeekFrom::Start(start_pos)).await?;
         }
 
-        while let Some(chunk) = tokio::time::timeout(self.config.timeout, response.chunk()).await?? {
+        while let Some(chunk) =
+            tokio::time::timeout(self.config.timeout, response.chunk()).await??
+        {
             file.write_all(&chunk).await?;
             pb.inc(chunk.len() as u64);
             self.state.total_pb.inc(chunk.len() as u64);
@@ -422,7 +469,11 @@ impl FileDownloader {
         Ok(())
     }
 
-    async fn download_multi_threaded(&self, total_size: u64, pb: ProgressBar) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    async fn download_multi_threaded(
+        &self,
+        total_size: u64,
+        pb: ProgressBar,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let num_chunks = std::cmp::min(
             self.config.concurrent_chunks,
             (total_size / self.config.chunk_size + 1) as usize,
@@ -455,7 +506,18 @@ impl FileDownloader {
             let total_pb = self.state.total_pb.clone();
             let handle = tokio::spawn(async move {
                 let _permit = semaphore_clone.acquire().await.unwrap();
-                download_chunk(client, url, output_path, start, end, pb_clone, timeout, limiter, total_pb).await
+                download_chunk(
+                    client,
+                    url,
+                    output_path,
+                    start,
+                    end,
+                    pb_clone,
+                    timeout,
+                    limiter,
+                    total_pb,
+                )
+                .await
             });
 
             handles.push(handle);
@@ -484,21 +546,17 @@ async fn download_chunk(
     let mut headers = HeaderMap::new();
     headers.insert(RANGE, format!("bytes={}-{}", start, end).parse().unwrap());
 
-    let response = tokio::time::timeout(
-        timeout,
-        client.get(&url).headers(headers).send()
-    ).await??;
-    
+    let response =
+        tokio::time::timeout(timeout, client.get(&url).headers(headers).send()).await??;
+
     if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
         return Err("Server did not return partial content for chunk request".into());
     }
 
     let mut response = response;
-    
-    let mut file = OpenOptions::new()
-        .write(true)
-        .open(&output_path).await?;
-    
+
+    let mut file = OpenOptions::new().write(true).open(&output_path).await?;
+
     file.seek(SeekFrom::Start(start)).await?;
 
     while let Some(chunk) = tokio::time::timeout(timeout, response.chunk()).await?? {
@@ -513,11 +571,10 @@ async fn download_chunk(
     Ok(())
 }
 
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
-    
+
     if args.version {
         println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -531,8 +588,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     while i < args.urls.len() {
         let url = args.urls[i].clone();
         let mut checksum = None;
-        if i + 1 < args.urls.len() && args.urls[i+1].contains(':') {
-            if let Some(parsed) = Checksum::parse(&args.urls[i+1]) {
+        if i + 1 < args.urls.len() && args.urls[i + 1].contains(':') {
+            if let Some(parsed) = Checksum::parse(&args.urls[i + 1]) {
                 checksum = Some(parsed);
                 i += 1; // Consume the checksum argument
             }
@@ -573,8 +630,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let multi_progress = indicatif::MultiProgress::new();
     let semaphore = Arc::new(Semaphore::new(args.parallel_downloads));
-    let limiter = args.limit_rate.map(|limit| Arc::new(BandwidthLimiter::new(limit)));
-    
+    let limiter = args
+        .limit_rate
+        .map(|limit| Arc::new(BandwidthLimiter::new(limit)));
+
     // Total progress bar
     let total_pb = multi_progress.add(ProgressBar::new(0));
     total_pb.set_style(
@@ -617,7 +676,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             checksum,
         };
 
-        let downloader = Arc::new(FileDownloader::new(config, multi_progress.clone(), limiter.clone(), state.clone()));
+        let downloader = Arc::new(FileDownloader::new(
+            config,
+            multi_progress.clone(),
+            limiter.clone(),
+            state.clone(),
+        ));
         let sem = semaphore.clone();
 
         let handle = tokio::spawn(async move {
